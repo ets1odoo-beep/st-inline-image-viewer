@@ -67,7 +67,7 @@ After this extension is published to GitHub, you can install it directly from Si
 5. Leave **Branch or tag name** empty to use the default branch, or enter a branch/tag such as:
 
    ```text
-   main
+   master
    v1.2.0
    ```
 
