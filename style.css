@@ -1,0 +1,437 @@
+/* ========================================
+   Inline Image Viewer - Styles
+   Gives inline images the same controls as attached images.
+   ======================================== */
+
+/* Wrapper for inline images - mirrors .mes_img_container behavior */
+.mes_text .iiv-inline-img-container {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    width: fit-content;
+    border-radius: 5px;
+    overflow: hidden;
+    transition: all var(--animation-duration, 0.3s);
+    vertical-align: top;
+    cursor: default;
+}
+
+/* The inline image itself */
+.mes_text .iiv-inline-img-container > img {
+    display: block;
+    max-width: 100%;
+    max-height: 40vh;
+    image-rendering: -webkit-optimize-contrast;
+    cursor: pointer;
+    border-radius: 0;
+    margin: 0;
+}
+
+/* Controls bar - mirrors .mes_img_controls exactly */
+.iiv-inline-img-controls {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    display: flex;
+    opacity: 0;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px;
+    z-index: 1;
+    transition: opacity var(--animation-duration, 0.3s) ease-in-out;
+    background: linear-gradient(rgba(0, 0, 0, 0.8), transparent);
+}
+
+.iiv-inline-img-container:hover .iiv-inline-img-controls {
+    opacity: 1;
+}
+
+.iiv-inline-img-container:focus-within .iiv-inline-img-controls {
+    opacity: 1;
+}
+
+/* Style the control buttons to match SillyTavern's native ones */
+.iiv-inline-img-controls .right_menu_button {
+    filter: brightness(90%);
+    text-shadow: 1px 1px var(--SmartThemeShadowColor, black) !important;
+    padding: 1px;
+    height: 1.25em;
+    width: 1.25em;
+    cursor: pointer;
+    outline: none;
+}
+
+.iiv-inline-img-controls .right_menu_button:focus-visible {
+    filter: brightness(150%);
+    outline: 1px solid var(--SmartThemeQuoteColor, currentColor);
+    outline-offset: 3px;
+}
+
+.iiv-inline-img-controls .right_menu_button::before {
+    position: relative;
+    top: 0.6125em;
+}
+
+.iiv-inline-img-controls .right_menu_button:hover {
+    filter: brightness(150%);
+}
+
+.iiv-inline-img-counter {
+    color: white;
+    cursor: default;
+    display: inline-block;
+    font-size: 0.9em;
+    font-weight: bold;
+    line-height: 30px;
+    margin: 0 5px;
+    text-shadow: 1px 1px 2px black;
+    vertical-align: top;
+}
+
+.iiv-inline-img-error {
+    outline: 1px dashed var(--warning, #ffb347);
+}
+
+.iiv-loading {
+    opacity: 0.55 !important;
+    pointer-events: none;
+}
+
+/* Swipes overlay at the bottom */
+.iiv-inline-img-swipes {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    display: flex;
+    opacity: 0;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px;
+    z-index: 1;
+    transition: opacity var(--animation-duration, 0.3s) ease-in-out;
+    background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
+    pointer-events: none;
+}
+
+.iiv-inline-img-container:hover .iiv-inline-img-swipes {
+    opacity: 1;
+}
+
+.iiv-inline-img-swipes .right_menu_button {
+    pointer-events: auto;
+    filter: brightness(90%);
+    text-shadow: 1px 1px var(--SmartThemeShadowColor, black) !important;
+    padding: 1px;
+    height: 1.25em;
+    width: 1.25em;
+    cursor: pointer;
+}
+
+.iiv-inline-img-swipes .right_menu_button::before {
+    position: relative;
+    top: 0.6125em;
+}
+
+.iiv-inline-img-swipes .right_menu_button:hover {
+    filter: brightness(150%);
+}
+
+.iiv-inline-img-swipe-counter {
+    font-weight: 600;
+    filter: drop-shadow(2px 4px 6px black);
+    color: white;
+    font-size: 0.9em;
+    cursor: default;
+    pointer-events: auto;
+}
+
+/* Limit large image prompts to a single line on mobile so they don't cover the image */
+@media screen and (max-width: 768px) {
+    .img_enlarged_title {
+        display: -webkit-box;
+        -webkit-line-clamp: 1;
+        line-clamp: 1;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: normal;
+        max-width: 90vw;
+    }
+}
+
+/* Force controls and swipes to be visible on touch devices / mobile screens */
+@media (hover: none), (max-width: 768px) {
+    .iiv-inline-img-controls {
+        bottom: 0;
+        top: auto;
+        gap: 8px;
+        justify-content: center;
+        opacity: 0.92 !important;
+        padding: 7px;
+        pointer-events: auto !important;
+        background: linear-gradient(transparent, rgba(0, 0, 0, 0.78));
+    }
+
+    .iiv-inline-img-controls .right_menu_button {
+        min-height: 28px;
+        min-width: 28px;
+    }
+
+    .iiv-inline-img-counter {
+        line-height: 28px;
+    }
+}
+
+/* Full-screen adaptive viewer */
+.iiv-viewer-popup {
+    width: 100vw !important;
+    width: 100dvw !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    max-width: 100vw !important;
+    max-width: 100dvw !important;
+    max-height: 100vh !important;
+    max-height: 100dvh !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.iiv-viewer-popup .popup-content,
+.iiv-viewer-popup .popup-body {
+    width: 100% !important;
+    height: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.iiv-viewer {
+    align-items: center;
+    background: rgba(0, 0, 0, 0.92);
+    display: flex;
+    height: 100%;
+    justify-content: center;
+    overflow: hidden;
+    position: relative;
+    touch-action: none;
+    width: 100%;
+}
+
+.iiv-viewer-img {
+    cursor: grab;
+    max-height: 100vh;
+    max-height: 100dvh;
+    max-width: 100vw;
+    max-width: 100dvw;
+    object-fit: contain;
+    transform-origin: 0 0;
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+.iiv-viewer-img-dragging {
+    cursor: grabbing;
+}
+
+.iiv-viewer-toolbar {
+    align-items: center;
+    background: rgba(0, 0, 0, 0.68);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 8px;
+    bottom: 14px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+    left: 50%;
+    max-width: min(94vw, 780px);
+    padding: 7px 9px;
+    position: absolute;
+    transform: translateX(-50%);
+    z-index: 1001;
+}
+
+.iiv-viewer-btn {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    color: white;
+    cursor: pointer;
+    display: inline-flex;
+    font-size: 1rem;
+    height: 32px;
+    justify-content: center;
+    min-width: 32px;
+    padding: 0;
+    text-shadow: 1px 1px var(--SmartThemeShadowColor, black);
+}
+
+.iiv-viewer-btn:hover,
+.iiv-viewer-btn:focus-visible {
+    filter: brightness(150%);
+    outline: none;
+}
+
+.iiv-viewer-btn:disabled {
+    cursor: default;
+    filter: brightness(60%);
+    opacity: 0.45;
+}
+
+.iiv-viewer-btn.iiv-active {
+    color: var(--SmartThemeQuoteColor, #7cc7ff);
+    filter: brightness(140%);
+}
+
+.iiv-viewer-counter {
+    color: white;
+    font-size: 0.92rem;
+    font-weight: 700;
+    line-height: 32px;
+    min-width: 44px;
+    text-align: center;
+    text-shadow: 1px 1px var(--SmartThemeShadowColor, black);
+}
+
+.iiv-viewer-title {
+    background: linear-gradient(rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0.42));
+    box-sizing: border-box;
+    color: white;
+    left: 50%;
+    line-height: 1.35;
+    max-height: 22vh;
+    max-width: min(94vw, 980px);
+    overflow: auto;
+    padding: 9px 12px;
+    position: absolute;
+    top: 12px;
+    transform: translateX(-50%);
+    white-space: pre-wrap;
+    z-index: 1001;
+}
+
+.iiv-viewer-panel {
+    background: rgba(0, 0, 0, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 8px;
+    box-sizing: border-box;
+    color: white;
+    left: 50%;
+    max-height: min(42vh, 360px);
+    max-width: min(94vw, 980px);
+    overflow: auto;
+    padding: 10px 12px;
+    position: absolute;
+    top: 58px;
+    transform: translateX(-50%);
+    width: min(94vw, 980px);
+    z-index: 1002;
+}
+
+.iiv-viewer-meta {
+    font-family: var(--monoFontFamily, monospace);
+    font-size: 0.88rem;
+    line-height: 1.35;
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.iiv-viewer-prompt {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.iiv-viewer-prompt[hidden],
+.iiv-viewer-meta[hidden] {
+    display: none;
+}
+
+.iiv-viewer-prompt textarea {
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 6px;
+    box-sizing: border-box;
+    color: white;
+    min-height: 110px;
+    resize: vertical;
+    width: 100%;
+}
+
+.iiv-viewer-panel-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+@media screen and (max-width: 768px) {
+    .iiv-viewer-toolbar {
+        bottom: 8px;
+        gap: 4px;
+        max-width: 96vw;
+        padding: 6px;
+    }
+
+    .iiv-viewer-btn {
+        height: 34px;
+        min-width: 34px;
+    }
+
+    .iiv-viewer-title {
+        display: -webkit-box;
+        line-clamp: 2;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        max-height: 3.2em;
+        overflow: hidden;
+        top: 8px;
+    }
+
+    .iiv-viewer-panel {
+        max-height: 42vh;
+        top: 52px;
+    }
+}
+
+/* Push image prompts to the absolute bottom on PC to utilize empty letterbox space */
+@media screen and (min-width: 769px) {
+    .img_enlarged_container {
+        position: relative !important;
+        display: flex !important;
+        height: 100% !important;
+    }
+
+    .img_enlarged_holder {
+        flex-grow: 1 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        height: 100% !important;
+    }
+
+    .img_enlarged_container pre {
+        position: absolute !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        width: 100% !important;
+        margin: 0 !important;
+        max-height: 35vh !important;
+        z-index: 100 !important;
+        box-sizing: border-box !important;
+        background: linear-gradient(transparent, rgba(0,0,0,0.8) 20%) !important;
+        border-radius: 0 !important;
+    }
+    
+    .img_enlarged_container pre code {
+        background: rgba(0,0,0,0.6) !important;
+        border-radius: 6px !important;
+        display: inline-block !important;
+        margin-bottom: 10px !important;
+    }
+}
