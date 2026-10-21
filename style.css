@@ -20,7 +20,7 @@
 .mes_text .iiv-inline-img-container > img {
     display: block;
     max-width: 100%;
-    max-height: 40vh;
+    max-height: var(--iiv-inline-max-h, 40vh);
     image-rendering: -webkit-optimize-contrast;
     cursor: pointer;
     border-radius: 0;
@@ -97,70 +97,6 @@
 .iiv-loading {
     opacity: 0.55 !important;
     pointer-events: none;
-}
-
-/* Swipes overlay at the bottom */
-.iiv-inline-img-swipes {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    width: 100%;
-    display: flex;
-    opacity: 0;
-    flex-direction: row;
-    justify-content: space-between;
-    align-items: center;
-    padding: 10px;
-    z-index: 1;
-    transition: opacity var(--animation-duration, 0.3s) ease-in-out;
-    background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
-    pointer-events: none;
-}
-
-.iiv-inline-img-container:hover .iiv-inline-img-swipes {
-    opacity: 1;
-}
-
-.iiv-inline-img-swipes .right_menu_button {
-    pointer-events: auto;
-    filter: brightness(90%);
-    text-shadow: 1px 1px var(--SmartThemeShadowColor, black) !important;
-    padding: 1px;
-    height: 1.25em;
-    width: 1.25em;
-    cursor: pointer;
-}
-
-.iiv-inline-img-swipes .right_menu_button::before {
-    position: relative;
-    top: 0.6125em;
-}
-
-.iiv-inline-img-swipes .right_menu_button:hover {
-    filter: brightness(150%);
-}
-
-.iiv-inline-img-swipe-counter {
-    font-weight: 600;
-    filter: drop-shadow(2px 4px 6px black);
-    color: white;
-    font-size: 0.9em;
-    cursor: default;
-    pointer-events: auto;
-}
-
-/* Limit large image prompts to a single line on mobile so they don't cover the image */
-@media screen and (max-width: 768px) {
-    .img_enlarged_title {
-        display: -webkit-box;
-        -webkit-line-clamp: 1;
-        line-clamp: 1;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: normal;
-        max-width: 90vw;
-    }
 }
 
 /* Force controls and swipes to be visible on touch devices / mobile screens */
@@ -395,43 +331,5 @@
     .iiv-viewer-panel {
         max-height: 42vh;
         top: 52px;
-    }
-}
-
-/* Push image prompts to the absolute bottom on PC to utilize empty letterbox space */
-@media screen and (min-width: 769px) {
-    .img_enlarged_container {
-        position: relative !important;
-        display: flex !important;
-        height: 100% !important;
-    }
-
-    .img_enlarged_holder {
-        flex-grow: 1 !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        height: 100% !important;
-    }
-
-    .img_enlarged_container pre {
-        position: absolute !important;
-        bottom: 0 !important;
-        left: 0 !important;
-        right: 0 !important;
-        width: 100% !important;
-        margin: 0 !important;
-        max-height: 35vh !important;
-        z-index: 100 !important;
-        box-sizing: border-box !important;
-        background: linear-gradient(transparent, rgba(0,0,0,0.8) 20%) !important;
-        border-radius: 0 !important;
-    }
-    
-    .img_enlarged_container pre code {
-        background: rgba(0,0,0,0.6) !important;
-        border-radius: 6px !important;
-        display: inline-block !important;
-        margin-bottom: 10px !important;
     }
 }

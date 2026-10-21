@@ -11,32 +11,192 @@ import { Popup, POPUP_TYPE } from '../../../popup.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 import { power_user } from '../../../power-user.js';
 
+// ── Pure helpers (no DOM) ────────────────────────────────────────────────────
+// Kept outside the jQuery-ready callback so they can be unit-tested under node
+// (tools/profile-harness) and reused by the rerender path.
+const IIV_SETTINGS_KEY = 'st-inline-image-viewer';
+const IIV_DEFAULTS = Object.freeze({
+    debug: false,
+    zoomStep: 1.2,          // wheel / keyboard / button zoom factor
+    inlineMaxHeightVh: 40,  // inline image max height in the chat, in vh
+    seedMode: 'random',     // 'random' = new seed per rerender; 'keep' = leave seed to the backend
+});
+const IIV_GENERIC_ALT_RE = /^(?:generated )?images?$/i;
+// Same fallback presets as st-image-auto-generation's defaults.
+const IIV_DEFAULT_PRESETS = Object.freeze({
+    portrait: { width: 512, height: 768 },
+    landscape: { width: 768, height: 512 },
+    closeup: { width: 512, height: 640 },
+    scene: { width: 768, height: 448 },
+    square: { width: 512, height: 512 },
+});
+// Backreference so an apostrophe inside a double-quoted prompt ("girl's dress") is kept.
+const IIV_PIC_TAG_RE = /<pic\b[^>]*?\sprompt=(['"])([\s\S]*?)\1[^>]*\/?>/gi;
+
+function iivOrigin() {
+    return (typeof window !== 'undefined' && window.location?.origin) || 'http://localhost';
+}
+
+// Markdown-safe URL: quotes end the URL and start a title, ) ends it, [ ] end
+// the image syntax, < > form an autolink, # starts a fragment. Mirrors the
+// encoder in st-image-auto-generation so both write the same links.
+function iivEncodeMarkdownUrl(url) {
+    return String(url || '')
+        .replace(/%(?![0-9A-Fa-f]{2})/g, '%25')
+        .replace(/ /g, '%20')
+        .replace(/\(/g, '%28')
+        .replace(/\)/g, '%29')
+        .replace(/"/g, '%22')
+        .replace(/'/g, '%27')
+        .replace(/</g, '%3C')
+        .replace(/>/g, '%3E')
+        .replace(/\[/g, '%5B')
+        .replace(/\]/g, '%5D')
+        .replace(/\|/g, '%7C')
+        .replace(/#/g, '%23');
+}
+
+// Pathname without origin, decoded and lower-cased, for comparing the same
+// image written as "http://host/foo%20bar.png", "/foo bar.png" or "foo bar.png".
+function iivNormalizeUrl(url) {
+    const raw = String(url || '');
+    try {
+        const parsed = new URL(raw, iivOrigin());
+        const value = parsed.origin === iivOrigin() ? parsed.pathname : parsed.href;
+        return decodeURIComponent(value).replace(/^\/+/, '').toLowerCase();
+    } catch {
+        try { return decodeURIComponent(raw).replace(/^\/+/, '').toLowerCase(); }
+        catch { return raw.toLowerCase(); }
+    }
+}
+
+// Relative, markdown-encoded path for storing in the chat (works across
+// localhost / LAN hostnames).
+function iivToRelativePath(url) {
+    if (!url) return url;
+    try {
+        const parsed = new URL(url, iivOrigin());
+        const path = parsed.origin === iivOrigin() ? parsed.pathname.replace(/^\/+/, '') : parsed.href;
+        return iivEncodeMarkdownUrl(path);
+    } catch {
+        return iivEncodeMarkdownUrl(url);
+    }
+}
+
+// Variant slot: the stack that already holds this URL wins, so a failed
+// earlier <pic> or an edited message does not shift prompts between images;
+// an unseen image falls back to its DOM position (the key auto-gen writes).
+function iivResolveSlotKey(variants, src, index) {
+    const norm = iivNormalizeUrl(src);
+    if (variants && typeof variants === 'object' && norm) {
+        for (const [key, stack] of Object.entries(variants)) {
+            if (Array.isArray(stack) && stack.some(entry => iivNormalizeUrl(entry) === norm)) return key;
+        }
+    }
+    return 'inline_img_' + Math.max(0, Number(index) || 0);
+}
+
+function iivPicPromptAt(mes, index) {
+    const re = new RegExp(IIV_PIC_TAG_RE.source, 'gi');
+    let m, i = 0;
+    while ((m = re.exec(String(mes || ''))) !== null) {
+        if (i === index) return String(m[2] || '').trim();
+        i++;
+    }
+    return '';
+}
+
+// Prompt for a rerender, in priority order; read-only.
+function iivResolvePrompt({ stored = '', alt = '', mes = '', index = 0, title = '' } = {}) {
+    if (stored && String(stored).trim()) return String(stored).trim();
+    const cleanAlt = String(alt || '').trim();
+    if (cleanAlt && !IIV_GENERIC_ALT_RE.test(cleanAlt)) return cleanAlt;
+    const fromTag = iivPicPromptAt(mes, index);
+    if (fromTag) return fromTag;
+    const cleanTitle = String(title || '').trim();
+    if (cleanTitle) return cleanTitle;
+    return cleanAlt;
+}
+
+// Only generated images get a rerender control: a stored prompt or type from
+// auto-gen, or a non-generic alt text (the prompt auto-gen writes as alt).
+function iivIsGeneratedImage({ stored = '', storedType = '', alt = '' } = {}) {
+    if (stored && String(stored).trim()) return true;
+    if (storedType) return true;
+    const cleanAlt = String(alt || '').trim();
+    return Boolean(cleanAlt && !IIV_GENERIC_ALT_RE.test(cleanAlt));
+}
+
+// The same /sd arguments auto-gen sends, plus an optional seed.
+function iivBuildRerenderArgs({ storedType = '', imgSettings = null, seedMode = 'random' } = {}) {
+    const presets = imgSettings?.resolutionPresets && typeof imgSettings.resolutionPresets === 'object'
+        ? imgSettings.resolutionPresets : IIV_DEFAULT_PRESETS;
+    const defaultType = imgSettings?.defaultType || 'portrait';
+    const type = storedType && presets[storedType] ? storedType : (presets[defaultType] ? defaultType : 'portrait');
+    const dims = presets[type] || IIV_DEFAULT_PRESETS[type] || IIV_DEFAULT_PRESETS.portrait;
+    const args = {
+        quiet: 'true',
+        processing: 'minimal',
+        extend: 'false',
+        width: String(dims.width),
+        height: String(dims.height),
+    };
+    const negative = String(imgSettings?.negativePrompt || '').trim();
+    if (negative) args.negative = negative;
+    if (seedMode === 'random') args.seed = String(Math.floor(Math.random() * 2147483647));
+    return args;
+}
+
+// True when the message an image belonged to is gone, renumbered or swapped
+// while a rerender was in flight.
+function iivIsStale({ imgConnected = true, liveMesId = null, mesId = null, liveMsg = null, msgRef = null } = {}) {
+    if (!imgConnected) return true;
+    if (String(liveMesId ?? '') !== String(mesId ?? '')) return true;
+    if (msgRef && liveMsg !== msgRef) return true;
+    return false;
+}
+
+if (typeof window !== 'undefined') {
+    window.iivApi = {
+        IIV_DEFAULTS, IIV_DEFAULT_PRESETS, IIV_PIC_TAG_RE,
+        encodeMarkdownUrl: iivEncodeMarkdownUrl, normalizeUrl: iivNormalizeUrl, toRelativePath: iivToRelativePath,
+        resolveSlotKey: iivResolveSlotKey, picPromptAt: iivPicPromptAt, resolvePrompt: iivResolvePrompt,
+        isGeneratedImage: iivIsGeneratedImage, buildRerenderArgs: iivBuildRerenderArgs, isStale: iivIsStale,
+    };
+}
+
 jQuery(async function () {
-    const extensionName = 'st-inline-image-viewer';
+    const extensionName = IIV_SETTINGS_KEY;
     const logPrefix = `[${extensionName}]`;
     const PROCESSED_ATTR = 'data-iiv-processed';
     const LOADING_ATTR = 'data-iiv-load-listener';
-    const DEBUG = false;
     const imageNavRegistry = new WeakMap();
     const pendingContainers = new Set();
     let processTimer = null;
 
+    // Settings live in extension_settings[IIV_SETTINGS_KEY]; defaults fill in place.
+    function viewerSettings() {
+        const store = getContextSafe()?.extensionSettings;
+        if (!store) return { ...IIV_DEFAULTS };
+        const st = store[IIV_SETTINGS_KEY] || (store[IIV_SETTINGS_KEY] = {});
+        for (const [key, value] of Object.entries(IIV_DEFAULTS)) if (st[key] === undefined) st[key] = value;
+        return st;
+    }
+    function zoomStep() {
+        const v = Number(viewerSettings().zoomStep);
+        return Number.isFinite(v) && v > 1 && v < 4 ? v : IIV_DEFAULTS.zoomStep;
+    }
+    function applyInlineMaxHeight() {
+        const v = Number(viewerSettings().inlineMaxHeightVh);
+        const vh = Number.isFinite(v) && v >= 10 && v <= 100 ? v : IIV_DEFAULTS.inlineMaxHeightVh;
+        document.documentElement.style.setProperty('--iiv-inline-max-h', `${vh}vh`);
+    }
+
     function debugLog(...args) {
-        if (DEBUG) console.log(logPrefix, ...args);
+        if (viewerSettings().debug) console.log(logPrefix, ...args);
     }
 
     debugLog('Initializing...');
-
-    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-        const ctx = SillyTavern.getContext();
-        if (ctx && ctx.eventSource) {
-            ctx.eventSource.on('messageFormatting', (args) => {
-                if (args && typeof args.text === 'string') {
-                    args.text = sanitizeRenderedImageMarkdown(args.text);
-                }
-            });
-        }
-    }
 
     /**
      * Returns the current character's SD positive prompt prefix, or '' if none / in a group.
@@ -58,11 +218,27 @@ jQuery(async function () {
         return typeof SillyTavern !== 'undefined' && SillyTavern.getContext ? SillyTavern.getContext() : null;
     }
 
-    function safeSaveChat() {
+    // One debounced save for variant swipes, prompt edits and link rewrites;
+    // every swipe used to call the immediate saveChat.
+    let saveTimer = null;
+    function scheduleSave() {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => {
+            const ctx = getContextSafe();
+            const saveFn = ctx?.saveChat || ctx?.saveChatDebounced || (typeof window !== 'undefined' ? window.saveChatDebounced : null);
+            if (typeof saveFn === 'function') {
+                try { saveFn(); } catch (err) { console.error(logPrefix, 'saveChat failed:', err); }
+            }
+        }, 500);
+    }
+    function safeSaveChat() { scheduleSave(); }
+
+    function emitMessageUpdated(mesId) {
         const ctx = getContextSafe();
-        const saveFn = ctx?.saveChat || ctx?.saveChatDebounced || (typeof window !== 'undefined' ? window.saveChatDebounced : null);
-        if (typeof saveFn === 'function') {
-            saveFn();
+        const types = ctx?.eventTypes || ctx?.event_types;
+        const type = types?.MESSAGE_UPDATED;
+        if (ctx?.eventSource && type !== undefined && mesId !== null && mesId !== undefined) {
+            try { ctx.eventSource.emit(type, Number(mesId)); } catch (err) { debugLog('MESSAGE_UPDATED emit failed', err?.message); }
         }
     }
 
@@ -84,10 +260,7 @@ jQuery(async function () {
     }
 
     function encodeMarkdownUrl(url) {
-        return String(url || '')
-            .replace(/%20/g, ' ').replace(/ /g, '%20')
-            .replace(/%28/g, '(').replace(/\(/g, '%28')
-            .replace(/%29/g, ')').replace(/\)/g, '%29');
+        return iivEncodeMarkdownUrl(url);
     }
 
     function unescapeMarkdownText(text) {
@@ -236,14 +409,6 @@ jQuery(async function () {
             cursor = entry.end;
         }
         return result + text.slice(cursor);
-    }
-
-    function sanitizeRenderedImageMarkdown(text) {
-        return replaceMarkdownImages(text, (entry) => {
-            const alt = entry.alt.replace(/\r?\n/g, ' ').replace(/\[/g, '&#91;').replace(/\]/g, '&#93;');
-            const titleSuffix = entry.title ? ` "${entry.title.replace(/"/g, '\\"')}"` : '';
-            return `![${alt}](${entry.url}${titleSuffix})`;
-        });
     }
 
     function isExternalImageBlocked(src) {
@@ -408,12 +573,24 @@ jQuery(async function () {
             popup?.completeCancelled();
         }
 
+        // Drag/pinch bookkeeping. A press that starts on the toolbar, a panel
+        // or the title is left to those controls (taps on touch screens were
+        // swallowed by preventDefault); a background click only closes the
+        // viewer when the pointer did not travel (DRAG_CLOSE_PX).
+        const DRAG_CLOSE_PX = 6;
+        let dragStartClientX = 0;
+        let dragStartClientY = 0;
+        let dragDistance = 0;
+        const isControlTarget = (target) => target instanceof Element && Boolean(target.closest('.iiv-viewer-toolbar, .iiv-viewer-panel, .iiv-viewer-title'));
+
         const onPointerDown = (e) => {
+            if (isControlTarget(e.target)) return;
             if (e.touches && e.touches.length === 2) {
                 const dx = e.touches[0].clientX - e.touches[1].clientX;
                 const dy = e.touches[0].clientY - e.touches[1].clientY;
                 initialPinchDistance = Math.hypot(dx, dy);
                 initialScale = scale;
+                e.preventDefault();
                 return;
             }
             isDragging = true;
@@ -422,6 +599,9 @@ jQuery(async function () {
             const clientY = e.touches ? e.touches[0].clientY : e.clientY;
             startX = clientX - pannedX;
             startY = clientY - pannedY;
+            dragStartClientX = clientX;
+            dragStartClientY = clientY;
+            dragDistance = 0;
             e.preventDefault();
         };
 
@@ -430,13 +610,18 @@ jQuery(async function () {
                 const dx = e.touches[0].clientX - e.touches[1].clientX;
                 const dy = e.touches[0].clientY - e.touches[1].clientY;
                 const dist = Math.hypot(dx, dy);
-                scale = Math.max(0.5, Math.min(initialScale * (dist / initialPinchDistance), 10));
-                updateTransform();
+                // Same limits as the wheel and buttons, zoomed around the pinch midpoint.
+                const target = Math.max(0.1, Math.min(initialScale * (dist / initialPinchDistance), 20));
+                const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                if (scale > 0) zoomBy(target / scale, midX, midY);
+                e.preventDefault();
                 return;
             }
             if (!isDragging) return;
             const clientX = e.touches ? e.touches[0].clientX : e.clientX;
             const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            dragDistance = Math.max(dragDistance, Math.hypot(clientX - dragStartClientX, clientY - dragStartClientY));
             pannedX = clientX - startX;
             pannedY = clientY - startY;
             updateTransform();
@@ -451,7 +636,8 @@ jQuery(async function () {
         const onWheel = (e) => {
             e.preventDefault();
             const delta = (e.deltaY || -e.wheelDelta || e.detail) > 0 ? -1 : 1;
-            zoomBy(delta > 0 ? 1.2 : 1 / 1.2, e.clientX, e.clientY);
+            const step = zoomStep();
+            zoomBy(delta > 0 ? step : 1 / step, e.clientX, e.clientY);
         };
 
         mediaContainer.addEventListener('mousedown', onPointerDown);
@@ -575,10 +761,10 @@ jQuery(async function () {
             });
 
             toolbar.append(
-                createViewerButton('fa-magnifying-glass-minus', 'Zoom out', () => zoomBy(1 / 1.2)),
+                createViewerButton('fa-magnifying-glass-minus', 'Zoom out', () => zoomBy(1 / zoomStep())),
                 createViewerButton('fa-rotate-left', 'Reset zoom', resetZoom),
                 actualSizeBtn,
-                createViewerButton('fa-magnifying-glass-plus', 'Zoom in', () => zoomBy(1.2)),
+                createViewerButton('fa-magnifying-glass-plus', 'Zoom in', () => zoomBy(zoomStep())),
                 createViewerButton('fa-up-right-from-square', 'Open in new tab', () => window.open(img.src, '_blank')),
                 createViewerButton('fa-copy', 'Copy image URL', async () => copyText(img.src, 'Image URL copied!')),
                 promptCopyBtn,
@@ -671,6 +857,10 @@ jQuery(async function () {
                 target.closest('[contenteditable="true"]')
             );
             if (isEditing) return;
+            // Leave browser shortcuts alone (Ctrl+Plus zoom, Ctrl+0, Cmd+I ...);
+            // Alt is only a modifier for the Alt+Arrow image navigation below.
+            if (e.ctrlKey || e.metaKey) return;
+            if (e.altKey && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
 
             if (e.key === 'Escape') {
                 e.preventDefault();
@@ -680,10 +870,10 @@ jQuery(async function () {
                 resetZoom();
             } else if (e.key === '+' || e.key === '=') {
                 e.preventDefault();
-                zoomBy(1.2);
+                zoomBy(zoomStep());
             } else if (e.key === '-' || e.key === '_') {
                 e.preventDefault();
-                zoomBy(1 / 1.2);
+                zoomBy(1 / zoomStep());
             } else if (!minimal && e.key.toLowerCase() === 'i') {
                 e.preventDefault();
                 togglePanel(metaPanel);
@@ -714,7 +904,9 @@ jQuery(async function () {
 
         let lastClick = 0;
         mediaContainer.addEventListener('click', (e) => {
-            if (e.target !== img && !e.target.closest?.('.iiv-viewer-toolbar') && !e.target.closest?.('.iiv-viewer-title') && !e.target.closest?.('.iiv-viewer-panel')) {
+            // A pan that ends on the background is not a click to close.
+            if (dragDistance > DRAG_CLOSE_PX) { dragDistance = 0; return; }
+            if (e.target !== img && !isControlTarget(e.target)) {
                 closePopup();
             } else {
                 const now = Date.now();
@@ -916,45 +1108,17 @@ jQuery(async function () {
         const siblingImages = Array.from((mesEl || document).querySelectorAll('.mes_text img:not(.mes_img):not(.avatar):not(.icon-svg)'));
         const imageIndex = Math.max(0, siblingImages.indexOf(imgEl));
 
-        const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : null;
-        const stChat = ctx ? ctx.chat : (typeof chat !== 'undefined' ? chat : null);
+        const ctx = getContextSafe();
+        const stChat = ctx ? ctx.chat : null;
 
-        /**
-         * Convert any URL to a relative path, stripping the origin.
-         * This prevents cross-origin errors when the user accesses ST
-         * via different hostnames (localhost vs LAN IP).
-         */
-        function toRelativePath(url) {
-            if (!url) return url;
-            try {
-                const parsed = new URL(url, window.location.origin);
-                const path = parsed.origin === window.location.origin ? parsed.pathname.replace(/^\/+/, '') : parsed.href;
-                return encodeMarkdownUrl(path);
-            } catch {
-                return encodeMarkdownUrl(url);
-            }
-        }
+        // Shared URL helpers (module level); kept under their old local names.
+        const toRelativePath = iivToRelativePath;
+        const normalizeUrlForCompare = iivNormalizeUrl;
 
         // Always store relative paths to avoid cross-origin issues
         let imageStack = [toRelativePath(imgEl.src)];
         let currentIndex = 0;
-
-        /**
-         * Normalize a URL to just its pathname for robust comparison.
-         * Strips origin/protocol and decodes percent-encoding so that
-         * e.g. "http://localhost:8000/foo%20bar.png" matches "/foo bar.png".
-         */
-        function normalizeUrlForCompare(url) {
-            try {
-                const parsed = new URL(url, window.location.origin);
-                const value = parsed.origin === window.location.origin ? parsed.pathname : parsed.href;
-                return decodeURIComponent(value).replace(/^\/+/, '').toLowerCase();
-            } catch {
-                // Fallback: just decode and lowercase
-                try { return decodeURIComponent(url).replace(/^\/+/, '').toLowerCase(); }
-                catch { return url.toLowerCase(); }
-            }
-        }
+        let rerenderInFlight = false;
 
         /**
          * Find index in imageStack that matches the given src, using normalized comparison.
@@ -987,10 +1151,11 @@ jQuery(async function () {
             if (!msg.extra) msg.extra = {};
             if (!msg.extra.inlineImageVariants) msg.extra.inlineImageVariants = {};
             if (!msg.extra.inlineImagePrompts) msg.extra.inlineImagePrompts = {};
-            
-            // Generate a completely stable key based on DOM index, surviving markdown URL changes!
-            currentSrcKey = 'inline_img_' + imageIndex;
-            
+
+            // The variant stack that already holds this URL wins; a new image
+            // takes its DOM-position key (the key auto-gen writes prompts to).
+            currentSrcKey = iivResolveSlotKey(msg.extra.inlineImageVariants, imgEl.src, imageIndex);
+
             if (Array.isArray(msg.extra.inlineImageVariants[currentSrcKey])) {
                 // Load persisted stack, convert to relative paths, and deduplicate
                 imageStack = deduplicateStack(msg.extra.inlineImageVariants[currentSrcKey]);
@@ -1028,7 +1193,7 @@ jQuery(async function () {
                     foundEntry = mdEntries[imageIndex];
                 }
 
-                if (foundEntry && foundEntry.alt && !/^images?$/i.test(foundEntry.alt) && !/^generated images?$/i.test(foundEntry.alt)) {
+                if (foundEntry && foundEntry.alt && !IIV_GENERIC_ALT_RE.test(foundEntry.alt)) {
                     msg.extra.inlineImagePrompts[currentSrcKey] = foundEntry.alt;
                 }
             }
@@ -1039,100 +1204,62 @@ jQuery(async function () {
             const dynamicMesId = currentMesEl ? currentMesEl.getAttribute('mesid') : mesId;
             if (!dynamicMesId || !stChat || !stChat[dynamicMesId]) return;
             const msg = stChat[dynamicMesId];
-            
-            // Normalize a URL for comparison: decode percent-encoding, strip origin, lowercase
-            function normForMatch(url) {
-                try {
-                    let u = url;
-                    // Strip origin if present
-                    if (u.startsWith('http')) {
-                        try { u = new URL(u).pathname; } catch {}
-                    }
-                    if (u.startsWith('/')) u = u.substring(1);
-                    return decodeURIComponent(u).toLowerCase();
-                } catch {
-                    return url.toLowerCase();
-                }
-            }
 
-            // Build the relative new URL to write into markdown
-            let relNewSrc = newSrc;
-            try {
-                const parsed = new URL(newSrc, window.location.origin);
-                relNewSrc = parsed.origin === window.location.origin ? parsed.pathname.replace(/^\/+/, '') : parsed.href;
-            } catch {
-                relNewSrc = String(newSrc || '').replace(/^\/+/, '');
-            }
-            relNewSrc = encodeMarkdownUrl(relNewSrc);
-
-            const normOld = normForMatch(oldSrc);
+            const relNewSrc = toRelativePath(newSrc);
+            const normOld = normalizeUrlForCompare(oldSrc);
 
             // Find all ![alt](url) in msg.mes and replace the one matching oldSrc
             let replaced = false;
             msg.mes = replaceMarkdownImages(msg.mes, (entry) => {
                 if (replaced) return entry.raw; // Only replace first match
-                const normUrl = normForMatch(entry.url);
-                if (normUrl === normOld) {
+                if (normalizeUrlForCompare(entry.url) === normOld) {
                     replaced = true;
                     const titleSuffix = entry.title ? ` "${entry.title.replace(/"/g, '\\"')}"` : '';
                     return `![${entry.rawAlt}](${relNewSrc}${titleSuffix})`;
                 }
                 return entry.raw;
             });
-            
+
             if (replaced) {
-                safeSaveChat();
+                // Keep the current swipe in step with mes, tell ST, and save (debounced).
+                if (Array.isArray(msg.swipes) && Number.isInteger(msg.swipe_id) && msg.swipes[msg.swipe_id] !== undefined) {
+                    msg.swipes[msg.swipe_id] = msg.mes;
+                }
+                emitMessageUpdated(dynamicMesId);
+                scheduleSave();
             }
         }
 
 
-        // Recover the actual SD prompt for regeneration.
-        // Priority: (1) persisted per-image prompt, (2) non-generic alt text, (3) N-th <pic> tag, (4) msg.extra.title
-        function getRegenerationPrompt() {
-            const currentAlt = (imgEl.alt || imgEl.title || '').trim();
+        // The message this image belongs to right now (ST renumbers mesid on deletes).
+        function liveMessage() {
             const currentMesEl = imgEl.closest('.mes');
             const dynamicMesId = currentMesEl ? currentMesEl.getAttribute('mesid') : mesId;
+            const msg = dynamicMesId !== null && stChat ? stChat[dynamicMesId] : null;
+            return { mesId: dynamicMesId, msg };
+        }
 
-            // 1. Check persisted per-image prompt first (most reliable for rerenders)
-            if (dynamicMesId && stChat && stChat[dynamicMesId]) {
-                const msg = stChat[dynamicMesId];
-                if (msg.extra && msg.extra.inlineImagePrompts && msg.extra.inlineImagePrompts[currentSrcKey]) {
-                    return msg.extra.inlineImagePrompts[currentSrcKey];
-                }
-            }
+        // Recover the SD prompt for regeneration (read-only; the eager block
+        // above is the only place that persists an alt text).
+        // Priority: (1) persisted per-image prompt, (2) non-generic alt text, (3) N-th <pic> tag, (4) msg.extra.title
+        function getRegenerationPrompt() {
+            const { msg } = liveMessage();
+            return iivResolvePrompt({
+                stored: msg?.extra?.inlineImagePrompts?.[currentSrcKey] || '',
+                alt: imgEl.alt || imgEl.title || '',
+                mes: msg?.mes || '',
+                index: imageIndex,
+                title: typeof msg?.extra?.title === 'string' ? msg.extra.title : '',
+            });
+        }
 
-            // 2. If alt text exists and isn't generic, it's the most accurate per-image prompt
-            if (currentAlt && !/^images?$/i.test(currentAlt) && !/^generated images?$/i.test(currentAlt)) {
-                // Persist it for future rerenders
-                if (dynamicMesId && stChat && stChat[dynamicMesId]) {
-                    const msg = stChat[dynamicMesId];
-                    if (!msg.extra) msg.extra = {};
-                    if (!msg.extra.inlineImagePrompts) msg.extra.inlineImagePrompts = {};
-                    msg.extra.inlineImagePrompts[currentSrcKey] = currentAlt;
-                }
-                return currentAlt;
-            }
-
-            if (dynamicMesId && stChat && stChat[dynamicMesId]) {
-                const msg = stChat[dynamicMesId];
-                // 3. Try to parse the N-th <pic prompt="..."> tag matching this image's index
-                const picRegex = /<pic[^>]*\sprompt=['"]([\s\S]*?)['"]\s*\/?>/gi;
-                let picMatch;
-                let picIndex = 0;
-                while ((picMatch = picRegex.exec(msg.mes)) !== null) {
-                    if (picIndex === imageIndex && picMatch[1] && picMatch[1].trim()) {
-                        return picMatch[1].trim();
-                    }
-                    picIndex++;
-                }
-
-                // 4. Fallback to msg.extra.title (message-scoped, may be wrong for multi-image)
-                if (msg.extra && msg.extra.title && typeof msg.extra.title === 'string' && msg.extra.title.trim()) {
-                    return msg.extra.title.trim();
-                }
-            }
-            // Last resort
-            return currentAlt;
+        function isGeneratedImage() {
+            const { msg } = liveMessage();
+            return iivIsGeneratedImage({
+                stored: msg?.extra?.inlineImagePrompts?.[currentSrcKey] || '',
+                storedType: msg?.extra?.inlineImageTypes?.[currentSrcKey] || '',
+                alt: imgEl.alt || imgEl.title || '',
+            });
         }
 
         function getMessageImageContexts() {
@@ -1142,54 +1269,86 @@ jQuery(async function () {
             return images.map(image => imageNavRegistry.get(image)).filter(Boolean);
         }
 
-        function persistVariantState() {
-            if (mesId && stChat && stChat[mesId]) {
-                if (!stChat[mesId].extra) stChat[mesId].extra = {};
-                if (!stChat[mesId].extra.inlineImageVariants) stChat[mesId].extra.inlineImageVariants = {};
-                stChat[mesId].extra.inlineImageVariants[currentSrcKey] = imageStack;
-            }
+        function persistVariantState(msg = liveMessage().msg) {
+            if (!msg) return;
+            if (!msg.extra) msg.extra = {};
+            if (!msg.extra.inlineImageVariants) msg.extra.inlineImageVariants = {};
+            msg.extra.inlineImageVariants[currentSrcKey] = imageStack;
+            scheduleSave();
         }
 
-        function persistPrompt(prompt) {
-            if (mesId && stChat && stChat[mesId]) {
-                if (!stChat[mesId].extra) stChat[mesId].extra = {};
-                if (!stChat[mesId].extra.inlineImagePrompts) stChat[mesId].extra.inlineImagePrompts = {};
-                stChat[mesId].extra.inlineImagePrompts[currentSrcKey] = prompt;
-            }
+        function persistPrompt(prompt, msg = liveMessage().msg) {
+            if (!msg) return;
+            if (!msg.extra) msg.extra = {};
+            if (!msg.extra.inlineImagePrompts) msg.extra.inlineImagePrompts = {};
+            msg.extra.inlineImagePrompts[currentSrcKey] = prompt;
+            scheduleSave();
         }
 
+        // Rerender through the same pipeline auto-gen uses for a fresh picture:
+        // VIR look lock (stored identity rows) -> auto-gen's effective-prompt
+        // builder (cleaner, LoRA triggers, people count, character SD prefix,
+        // Krea2 closer) -> /sd with the same arguments. Falls back to the plain
+        // prefix path when auto-gen is not installed.
         async function rerenderInlineImage(promptOverride = null) {
+            if (rerenderInFlight) {
+                if (typeof toastr !== 'undefined') toastr.info('A rerender is already running for this image.', 'Inline Image Viewer');
+                return null;
+            }
             const promptToUse = String(promptOverride ?? getRegenerationPrompt() ?? '').trim();
             if (!promptToUse) {
                 if (typeof toastr !== 'undefined') toastr.warning('No image prompt found for this inline image.', 'Inline Image Viewer');
                 return null;
             }
+            const sdCmd = SlashCommandParser.commands['sd'] || SlashCommandParser.commands['imagine'];
+            if (!sdCmd || typeof sdCmd.callback !== 'function') {
+                if (typeof toastr !== 'undefined') toastr.warning('Stable Diffusion slash command is not available.', 'Inline Image Viewer');
+                return null;
+            }
+            rerenderInFlight = true;
             if (typeof toastr !== 'undefined') toastr.info('Rerendering inline image...', 'Stable Diffusion');
             try {
-                const sdCmd = SlashCommandParser.commands['imagine'] || SlashCommandParser.commands['sd'];
-                if (!sdCmd || typeof sdCmd.callback !== 'function') {
-                    if (typeof toastr !== 'undefined') toastr.warning('Stable Diffusion slash command is not available.', 'Inline Image Viewer');
-                    throw new Error('Stable Diffusion command not found');
+                const start = liveMessage();
+                const msgRef = start.msg;
+                const startMesId = start.mesId;
+                const imgSettings = getContextSafe()?.extensionSettings?.['st-image-auto-generation'] || null;
+                const storedType = msgRef?.extra?.inlineImageTypes?.[currentSrcKey] || '';
+                const args = iivBuildRerenderArgs({ storedType, imgSettings, seedMode: viewerSettings().seedMode });
+
+                let prompt = promptToUse;
+                const lock = window.stImageAutoGenLockLookSentences;
+                const copiesFn = window.ff4VirGetPicCopies;
+                if (typeof lock === 'function' && typeof copiesFn === 'function') {
+                    try { prompt = lock(prompt, await copiesFn()); } catch (err) { debugLog('look lock skipped:', err?.message); }
                 }
-                const rerenderArgs = { quiet: 'true' };
-                if (mesId && stChat && stChat[mesId]) {
-                    const storedType = stChat[mesId].extra?.inlineImageTypes?.[currentSrcKey];
-                    if (storedType) {
-                        const rCtx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : null;
-                        const imgSettings = rCtx?.extensionSettings?.['st-image-auto-generation'];
-                        const presets = imgSettings?.resolutionPresets;
-                        const defaultType = imgSettings?.defaultType || 'square';
-                        const resolvedType = (presets?.[storedType]) ? storedType : defaultType;
-                        const dims = presets?.[resolvedType] || { width: 512, height: 512 };
-                        rerenderArgs.width = String(dims.width);
-                        rerenderArgs.height = String(dims.height);
-                    }
+                const build = window.stImageAutoGenBuildEffectivePrompt;
+                let effectivePrompt;
+                if (typeof build === 'function') {
+                    effectivePrompt = build(prompt);
+                } else {
+                    const charPrefix = getCharacterSDPrefix();
+                    effectivePrompt = charPrefix ? `${charPrefix}, ${prompt}` : prompt;
                 }
-                const charPrefix = getCharacterSDPrefix();
-                const effectivePrompt = charPrefix ? `${charPrefix}, ${promptToUse}` : promptToUse;
-                const newUrlRaw = await sdCmd.callback(rerenderArgs, effectivePrompt);
+                debugLog('rerender args', args, 'prompt', effectivePrompt);
+
+                const newUrlRaw = await sdCmd.callback(args, effectivePrompt);
                 if (!newUrlRaw) {
-                    if (typeof toastr !== 'undefined') toastr.error('Stable Diffusion did not return an image URL.', 'Inline Image Viewer');
+                    if (typeof toastr !== 'undefined') toastr.error('Stable Diffusion did not return an image URL (check the ComfyUI/SD log).', 'Inline Image Viewer');
+                    return null;
+                }
+
+                // The chat may have changed while SD was rendering: a deleted or
+                // swiped message, a renumbered mesid, or a chat switch.
+                const live = liveMessage();
+                const stale = iivIsStale({
+                    imgConnected: imgEl.isConnected,
+                    liveMesId: live.mesId,
+                    mesId: startMesId,
+                    liveMsg: live.msg,
+                    msgRef,
+                });
+                if (stale) {
+                    if (typeof toastr !== 'undefined') toastr.warning('The message changed while the image was rendering; the new image was not inserted.', 'Inline Image Viewer');
                     return null;
                 }
 
@@ -1197,16 +1356,18 @@ jQuery(async function () {
                 const oldSrcMD = imageStack[currentIndex];
                 imageStack.push(newUrl);
                 currentIndex = imageStack.length - 1;
-                persistVariantState();
-                persistPrompt(promptToUse);
+                persistVariantState(msgRef);
+                persistPrompt(promptToUse, msgRef);
                 imgEl.src = newUrl;
                 updateSourceMessage(oldSrcMD, newUrl);
                 if (typeof toastr !== 'undefined') toastr.success('Inline image rerendered.', 'Stable Diffusion');
                 return { src: imgEl.src, title: imgEl.alt || imgEl.title || '', navContext };
             } catch (err) {
-                console.error('Inline Image Viewer Rerender Error:', err);
-                if (typeof toastr !== 'undefined') toastr.error('Failed to rerender image.');
+                console.error(logPrefix, 'Rerender error:', err);
+                if (typeof toastr !== 'undefined') toastr.error(`Failed to rerender image: ${err?.message || err}`, 'Inline Image Viewer');
                 return null;
+            } finally {
+                rerenderInFlight = false;
             }
         }
 
@@ -1216,7 +1377,7 @@ jQuery(async function () {
             getPrompt: getRegenerationPrompt,
             getState: () => ({ src: imgEl.src, title: imgEl.alt || imgEl.title || '', navContext }),
             canSwipeLeft: () => currentIndex > 0,
-            canSwipeRight: () => getRegenerationPrompt() || currentIndex < imageStack.length - 1,
+            canSwipeRight: () => currentIndex < imageStack.length - 1 || (isGeneratedImage() && !rerenderInFlight),
             isRightRerender: () => currentIndex >= imageStack.length - 1,
             canDeleteCurrentVariant: () => imageStack.length > 1,
             canMessageImageLeft: () => {
@@ -1272,6 +1433,7 @@ jQuery(async function () {
                     updateSourceMessage(oldSrcMD, imageStack[currentIndex]);
                     return imgEl.src;
                 }
+                if (!isGeneratedImage() || rerenderInFlight) return null;
                 const state = await rerenderInlineImage();
                 return state?.src || null;
             },
@@ -1431,8 +1593,8 @@ jQuery(async function () {
                 if (mesEl) {
                     const sdBtn = mesEl.querySelector('.sd_message_gen');
                     if (sdBtn instanceof HTMLElement) {
-                        sdBtn.click(); // Fires native SD regeneration
-                        if (typeof toastr !== 'undefined') toastr.info('Rerendering from current image prompt...', 'Stable Diffusion');
+                        sdBtn.click(); // Fires native SD regeneration of the message's current attached image
+                        if (typeof toastr !== 'undefined') toastr.info("Regenerating this message's current attached image with SillyTavern's own prompt...", 'Stable Diffusion');
                     } else {
                         if (typeof toastr !== 'undefined') toastr.warning('Stable Diffusion button not found on this message. Ensure SD is active.', 'Stable Diffusion');
                     }
@@ -1598,36 +1760,88 @@ jQuery(async function () {
         debugLog('Character avatar viewer initialized.');
     }
 
-    // --- Event-based hooks ---
-    // Use SillyTavern's event system if available
-    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-        const ctx = SillyTavern.getContext();
-        if (ctx && ctx.eventSource) {
-            // Re-process when chat changes
-            ctx.eventSource.on('chatLoaded', () => {
-                debugLog('Chat loaded, processing inline images...');
-                // Small delay to let DOM settle
+    // --- Event-based hooks (real SillyTavern event names) ---
+    // The old hooks used names ST never emits ('messageRendered', 'chatChanged',
+    // 'characterSelected'), so they never fired; the MutationObserver did all
+    // the work. These are the actual events.
+    function processMessageById(mesId) {
+        const id = Number(mesId);
+        if (!Number.isInteger(id)) { processAllMessages(); return; }
+        const mesEl = document.querySelector(`#chat .mes[mesid="${id}"]`);
+        if (mesEl) queueProcessContainer(mesEl); else processAllMessages();
+    }
+    {
+        const ctx = getContextSafe();
+        const types = ctx?.eventTypes || ctx?.event_types;
+        if (ctx?.eventSource && types) {
+            const on = (type, fn) => { if (type !== undefined) ctx.eventSource.on(type, fn); };
+            on(types.CHAT_CHANGED, () => {
+                debugLog('Chat changed, processing inline images...');
                 setTimeout(processAllMessages, 300);
                 setTimeout(setupCharacterAvatarViewer, 300);
             });
-
-            ctx.eventSource.on('messageRendered', (_messageId) => {
-                setTimeout(processAllMessages, 100);
-            });
-
-            ctx.eventSource.on('chatChanged', () => {
-                setTimeout(processAllMessages, 300);
-                setTimeout(setupCharacterAvatarViewer, 300);
-            });
-
-            // Also listen for character selection events
-            ctx.eventSource.on('characterSelected', () => {
-                setTimeout(setupCharacterAvatarViewer, 300);
-            });
+            on(types.CHARACTER_MESSAGE_RENDERED, (mesId) => setTimeout(() => processMessageById(mesId), 50));
+            on(types.USER_MESSAGE_RENDERED, (mesId) => setTimeout(() => processMessageById(mesId), 50));
+            // A swipe or edit re-renders the message with new <img> elements.
+            on(types.MESSAGE_SWIPED, (mesId) => setTimeout(() => processMessageById(mesId), 150));
+            on(types.MESSAGE_UPDATED, (mesId) => setTimeout(() => processMessageById(mesId), 150));
+            on(types.SETTINGS_UPDATED, () => applyInlineMaxHeight());
         }
     }
 
+    // --- Settings panel ---
+    function renderSettingsPanel() {
+        const host = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
+        if (!host || document.getElementById('iiv_settings')) return;
+        const st = viewerSettings();
+        const wrap = document.createElement('div');
+        wrap.id = 'iiv_settings';
+        wrap.className = 'extension_container';
+        wrap.innerHTML = `
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b>Inline Image Viewer</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <div class="flex-container flexnowrap" title="New seed per rerender, or leave the seed to the image backend. Only matters when the ComfyUI workflow uses the %seed% placeholder; a workflow with a hard-coded seed ignores it.">
+                        <label for="iiv_seed_mode" class="flex1">Rerender seed</label>
+                        <select id="iiv_seed_mode" class="text_pole widthNatural margin0">
+                            <option value="random">New random seed</option>
+                            <option value="keep">Leave to backend</option>
+                        </select>
+                    </div>
+                    <div class="flex-container flexnowrap" title="Zoom factor per wheel notch, key press or button (1.05 to 3).">
+                        <label for="iiv_zoom_step" class="flex1">Zoom step</label>
+                        <input id="iiv_zoom_step" type="number" class="text_pole widthUnset" style="width:80px" min="1.05" max="3" step="0.05">
+                    </div>
+                    <div class="flex-container flexnowrap" title="Maximum height of inline images in the chat, as a percentage of the window height.">
+                        <label for="iiv_inline_max_h" class="flex1">Inline image max height (vh)</label>
+                        <input id="iiv_inline_max_h" type="number" class="text_pole widthUnset" style="width:80px" min="10" max="100" step="5">
+                    </div>
+                    <label class="checkbox_label" for="iiv_debug"><input id="iiv_debug" type="checkbox"><span>Debug logs</span></label>
+                    <div style="opacity:0.72;font-size:0.86em;margin-top:4px">Rerenders go through Image Auto Generation's prompt pipeline (VIR look lock, cleaner, profile closer) when that extension is installed, with the same /sd arguments it uses.</div>
+                </div>
+            </div>`;
+        host.appendChild(wrap);
+        const seed = wrap.querySelector('#iiv_seed_mode');
+        const zoom = wrap.querySelector('#iiv_zoom_step');
+        const maxH = wrap.querySelector('#iiv_inline_max_h');
+        const dbg = wrap.querySelector('#iiv_debug');
+        seed.value = st.seedMode === 'keep' ? 'keep' : 'random';
+        zoom.value = String(st.zoomStep);
+        maxH.value = String(st.inlineMaxHeightVh);
+        dbg.checked = Boolean(st.debug);
+        const save = () => { const ctx = getContextSafe(); ctx?.saveSettingsDebounced?.(); };
+        seed.addEventListener('change', () => { viewerSettings().seedMode = seed.value === 'keep' ? 'keep' : 'random'; save(); });
+        zoom.addEventListener('change', () => { const v = Number(zoom.value); viewerSettings().zoomStep = Number.isFinite(v) && v > 1 && v < 4 ? v : IIV_DEFAULTS.zoomStep; zoom.value = String(viewerSettings().zoomStep); save(); });
+        maxH.addEventListener('change', () => { const v = Number(maxH.value); viewerSettings().inlineMaxHeightVh = Number.isFinite(v) && v >= 10 && v <= 100 ? v : IIV_DEFAULTS.inlineMaxHeightVh; maxH.value = String(viewerSettings().inlineMaxHeightVh); applyInlineMaxHeight(); save(); });
+        dbg.addEventListener('change', () => { viewerSettings().debug = dbg.checked; save(); });
+    }
+
     // --- Initial setup ---
+    applyInlineMaxHeight();
+    renderSettingsPanel();
     setupObserver();
     setupCharacterAvatarViewer();
 

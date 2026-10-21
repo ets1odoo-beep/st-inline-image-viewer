@@ -34,9 +34,11 @@ Inline Image Viewer improves image handling inside SillyTavern chat messages. It
   - copy URL
   - delete current variant with confirmation
   - download image
-- Stable Diffusion rerender support through SillyTavern slash commands:
-  - uses `/imagine` when available
-  - falls back to `/sd`
+- Stable Diffusion rerender support through SillyTavern's `/sd` command:
+  - when **Image Auto Generation** is installed, the prompt goes through the same pipeline as a fresh picture (FF4 VIR look lock, prompt cleaner, character SD prefix, profile closer) with the same `/sd` arguments (negative prompt, minimal processing, no extend, width/height)
+  - optional new random seed per rerender (only matters when the ComfyUI workflow uses `%seed%`)
+  - only generated images (a stored prompt/type, or a prompt-like alt text) get a rerender control
+  - the result is dropped with a warning if the message was deleted, swiped or renumbered while rendering
   - preserves per-image variant stacks in message metadata
   - stores per-image prompts in message metadata
 - Robust markdown image parsing:
@@ -132,12 +134,18 @@ When you rerender an inline image, the new image is added as a variant. Swiping 
 
 ## Stable Diffusion Notes
 
-Rerender requires a working SillyTavern image generation command:
+Rerender requires a working SillyTavern image generation command (`/sd`, alias `/imagine`). If it is not available, the extension shows a warning and leaves the image unchanged.
 
-- `/imagine`, or
-- `/sd`
+## Settings
 
-If neither command is available, the extension will show a warning and leave the image unchanged.
+Found in the Extensions panel under **Inline Image Viewer**:
+
+- **Rerender seed**: new random seed per rerender, or leave the seed to the backend. A ComfyUI workflow with a hard-coded seed ignores this.
+- **Zoom step**: factor per wheel notch, key press or button (default 1.2).
+- **Inline image max height (vh)**: how tall inline images may be in the chat (default 40).
+- **Debug logs**: console logging.
+
+Keyboard shortcuts are ignored while typing in a field and when Ctrl or Cmd is held, so browser zoom keeps working.
 
 When available, the extension also reuses dimensions stored by `st-image-auto-generation`.
 
