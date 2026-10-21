@@ -663,6 +663,15 @@ jQuery(async function () {
 
         const onKeyDown = async (e) => {
             if (e.defaultPrevented) return;
+
+            const target = e.target;
+            const isEditing = target instanceof Element && (
+                target.matches('input, textarea, select') ||
+                target.isContentEditable ||
+                target.closest('[contenteditable="true"]')
+            );
+            if (isEditing) return;
+
             if (e.key === 'Escape') {
                 e.preventDefault();
                 closePopup();

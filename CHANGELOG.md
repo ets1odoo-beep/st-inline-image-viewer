@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1 (2026-10-21)
+
+- Viewer keyboard shortcuts (Escape, arrows, zoom keys) no longer fire while typing in an input, textarea or contenteditable field, so editing a prompt inside the viewer does not close it or change the image.
+
 ## 1.2.0
 
 - Added full-screen custom image viewer controls.
